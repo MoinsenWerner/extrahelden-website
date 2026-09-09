@@ -1,0 +1,135 @@
+Alles klar, ich habe den Code an dein PHP-Skript angepasst. Da dein PHP-Skript die Namen direkt als kommagetrennten String ohne Präfix (wie `Names:`) im Body sendet und den Port **18888** anspricht, habe ich die Mod entsprechend konfiguriert.
+
+Hier ist die aktualisierte Fassung für **Fabric 1.21**:
+
+### 1. Der Initializer (Hauptklasse)
+
+Hier stellen wir den Port auf **18888** um und registrieren den Handler auf dem Root-Pfad `/`, da dein PHP-Skript keine spezifische Unterseite (wie `/api/get`) im `curl_init` anspricht.
+
+```java
+import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.minecraft.server.MinecraftServer;
+import com.sun.net.httpserver.HttpServer;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.util.concurrent.Executors;
+
+public class ExtraheldenSyncMod implements ModInitializer {
+    private static MinecraftServer minecraftServer;
+
+    @Override
+    public void onInitialize() {
+        ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+            minecraftServer = server;
+            startHttpServer();
+        });
+    }
+
+    private void startHttpServer() {
+        try {
+            // Port 18888 laut deinem PHP-Skript
+            HttpServer server = HttpServer.create(new InetSocketAddress(18888), 0);
+            
+            // Context auf "/" setzen, da curl_init('http://extrahelden.de:18888') nutzt
+            server.createContext("/", new ApiHandler(minecraftServer));
+            
+            server.setExecutor(Executors.newFixedThreadPool(5));
+            server.start();
+            System.out.println("[Extrahelden] API-Server gestartet auf Port 18888");
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+```
+
+### 2. Der ApiHandler
+
+Dieser verarbeitet nun den reinen Namen-String aus dem `$payload` deines PHP-Skripts.
+
+```java
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.network.ServerPlayerEntity;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.util.stream.Collectors;
+
+public class ApiHandler implements HttpHandler {
+    private final MinecraftServer server;
+
+    public ApiHandler(MinecraftServer server) {
+        this.server = server;
+    }
+
+    @Override
+    public void handle(HttpExchange exchange) throws IOException {
+        // Nur POST Anfragen erlauben
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(405, -1);
+            return;
+        }
+
+        // Body auslesen (direkter String: "name1,name2,name3")
+        String body;
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8))) {
+            body = br.lines().collect(Collectors.joining());
+        }
+
+        StringBuilder responseBuilder = new StringBuilder();
+
+        if (body != null && !body.isEmpty()) {
+            String[] names = body.split(",");
+
+            for (String name : names) {
+                String cleanName = name.trim();
+                ServerPlayerEntity player = server.getPlayerManager().getPlayer(cleanName);
+
+                // Daten ermitteln
+                // player.getHealth() gibt HP an (20 = 10 Herzen). Wir teilen durch 2 für "Anzahl Herzen".
+                float hearts = (player != null) ? player.getHealth() / 2.0f : 0.0f;
+                boolean linkedActivated = checkLinkedHeartStatus(player);
+
+                // Formatierung wie gewünscht
+                responseBuilder.append("name:").append(cleanName).append(";")
+                               .append("hearts:").append(String.format("%.1f", hearts)).append(";")
+                               .append("linkedheart_activated:").append(linkedActivated).append(";\n");
+            }
+        }
+
+        // Antwort an PHP senden
+        byte[] responseBytes = responseBuilder.toString().getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=UTF-8");
+        exchange.sendResponseHeaders(200, responseBytes.length);
+        
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(responseBytes);
+        }
+    }
+
+    private boolean checkLinkedHeartStatus(ServerPlayerEntity player) {
+        if (player == null) return false;
+        // Hier deine Logik einfügen, wie du prüfst ob das LinkedHeart aktiv ist.
+        // Beispiel: Prüfung auf einen bestimmten Scoreboard-Tag
+        return player.getCommandTags().contains("linkedheart_active");
+    }
+}
+
+```
+
+---
+
+### Was hat sich geändert?
+
+1. **Parsing:** Da dein PHP-Skript `implode(',', $names)` nutzt, erwartet die Mod kein `Names:`-Präfix mehr. Sie splittet einfach den kompletten Inhalt des Bodys.
+2. **Port:** Der Server lauscht jetzt auf **18888**.
+3. **Output:** Die Herzen werden jetzt durch 2 geteilt (Minecraft rechnet intern in Half-Hearts/HP, also 20.0 für 10 volle Herzen). Wenn du lieber die vollen HP (20) willst, entferne das `/ 2.0f`.
+4. **Sicherheitshinweis:** Da der Server nun unter `extrahelden.de:18888` erreichbar ist, kann *jeder* im Internet eine POST-Anfrage an deine Mod senden.
+* **Tipp:** Du solltest in der `handle`-Methode prüfen, ob die IP des Anfragers (`exchange.getRemoteAddress()`) mit der deines Webservers übereinstimmt, oder einen geheimen Key im Header mitsenden.
+
+
+
+**Soll ich dir zeigen, wie du eine IP-Sperre oder einen Sicherheits-Token (API Key) einbaust, damit nur deine Website die Daten abfragen darf?**
